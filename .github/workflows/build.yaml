@@ -1,4 +1,4 @@
-name: Monitor and Build New Releases
+name: Monitor and Build one from the repos
 
 # env from bridge-manager workflow
 env:
@@ -14,61 +14,41 @@ on:
 jobs:
   check-digest:
     runs-on: ubuntu-24.04
-    permissions:
-      contents: read
     outputs:
-      new_digest: ${{ steps.fetch-current.outputs.digest }}
-      run_build: ${{ steps.validate-digest.outputs.needs_build }}
+      digest_upstream: ${{ steps.compare-digest.outputs.digest_upstream }}
+      needs_build: ${{ steps.compare-digest.outputs.needs_build }}
     steps:
-      - name: Setup
-        uses: actions/checkout@v4
+      - name: 'Set up skopeo'
+        uses: warjiang/setup-skopeo@71776e03c10d767c04af8924fe5a67763f9b3d34 # v0.1.3
+        with:
+          version: v1.17.0
 
-      - name: Fetch Current latest Tag's Digest
-        id: fetch-current
+      - name: Compare upstream image digest with repo image digest
+        id: compare-digest
         run: |
-          LATEST_RELEASE=$(gh api \
-            --method GET \
-            "/orgs/beeper/packages/container/bridge-manager/versions" \
-            -H "Accept: application/vnd.github+json" \
-            -H "X-GitHub-Api-Version: 2022-11-28" \
-            | jq -r '.[] | select (.metadata.container.tags | index("latest"))'
-          )
-          DIGEST=$(echo $LATEST_RELEASE | jq -r ' .name')
-          CREATED_AT=$(echo $LATEST_RELEASE | jq -r ' .created_at')
-          UPDATED_AT=$(echo $LATEST_RELEASE | jq -r ' .updated_at')
+          DIGEST=$(skopeo inspect --override-os=linux --override-arch=amd64 docker://$GHCR_REGISTRY_IMAGE:latest --format '{{ index .Labels "com.beeper.bridge-manager.image.digest" }}' || echo unknown)
+          echo "Last image digest:     ${DIGEST}"
 
-          if [ -z "${DIGEST}" ]; then
-            echo "no detected output from gh cli!"
-            exit 1
-          fi
+          DIGEST_UPSTREAM=$(skopeo inspect --override-os=linux --override-arch=amd64 docker://ghcr.io/beeper/bridge-manager:latest --format "{{ .Digest }}")
+          echo "Upstream image digest: ${DIGEST_UPSTREAM}"
+          echo "digest_upstream=$DIGEST_UPSTREAM" >> "$GITHUB_OUTPUT"
 
-          echo "Package digest: ${DIGEST}"
-          echo "Package created at: ${CREATED_AT}"
-          echo "Package updated at: ${UPDATED_AT}"
-          echo "digest=$DIGEST" >> "$GITHUB_OUTPUT"
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Validate Digest
-        id: validate-digest
-        run: |
           NEEDS_BUILD="false"
-          echo "checking against last processed release (${{ vars.LAST_RELEASE_DIGEST }})"
-          if [[ "${{steps.fetch-current.outputs.digest}}" != "${{ vars.LAST_RELEASE_DIGEST }}" ]]; then
-            echo "The SHA digest does not match the cached value! A build will commence."
+          if [[ "$DIGEST" != "$DIGEST_UPSTREAM" ]]; then
+            echo "The last image digest does not match the one from upstream. A build will commence."
             NEEDS_BUILD="true"
           else
-            echo "The SHA digest matches the cached value. This image has already been processed."
+            echo "The upstream image digest matches the one from the repo. This image has already been processed."
           fi
-          echo "needs_build=$NEEDS_BUILD" >> "$GITHUB_OUTPUT"
 
+          echo "needs_build=$NEEDS_BUILD" >> "$GITHUB_OUTPUT"
 
 # Following stage is based on bridge-manager's workflow, @silkie's fork in particular
 
   build-docker:
     runs-on: ubuntu-latest
     needs: check-digest
-    if: ${{ needs.check-digest.outputs.run_build == 'true' }}
+    if: ${{ needs.check-digest.outputs.needs_build == 'true' }}
     permissions:
       contents: read
       packages: write
@@ -93,6 +73,8 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           images: ghcr.io/${{ github.repository }}
+          labels: |
+            com.beeper.bridge-manager.image.digest=${{ needs.check-digest.outputs.digest_upstream}}
           tags: |
             type=raw,value=latest
             type=sha,format=long,prefix=
@@ -110,28 +92,6 @@ jobs:
           push: true
           build-args: |
             COMMIT_HASH=${{ github.sha }}
-
-  update-digest:
-    runs-on: ubuntu-24.04
-    needs:
-      - build-docker
-      - check-digest
-    permissions:
-      contents: read
-      actions: write
-    steps:
-      - name: Setup
-        uses: actions/checkout@v4
-      - name: Update Repo Variable
-        run: |
-          gh api \
-          --method PATCH \
-          "/repos/${GITHUB_REPOSITORY}/actions/variables/LAST_RELEASE_DIGEST" \
-          -H "Accept: application/vnd.github+json" \
-          -H "X-GitHub-Api-Version: 2022-11-28" \
-          -f "name=LAST_RELEASE_DIGEST" -f "value=${{ needs.check-digest.outputs.new_digest }}"
-        env:
-          GH_TOKEN: ${{ secrets.VARIABLE_WRITE_KEY }}
 
   workflow-keepalive:
     runs-on: ubuntu-24.04
