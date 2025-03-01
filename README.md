@@ -1,3 +1,6 @@
+**Update**: arm64 builds are now officially supported: https://github.com/beeper/bridge-manager/pull/55
+
+
 # beeper-bridge-manager-multiarch
 
 CI/CD repo for building a multi-arch Container image for Beeper's [Bridge Manager](https://github.com/beeper/bridge-manager). This is to work around a lack of arm support on the primary repo (see [this issue](https://github.com/beeper/bridge-manager/issues/25))
